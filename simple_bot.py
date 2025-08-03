@@ -13,7 +13,7 @@ import aiosqlite
 from datetime import datetime, timedelta
 import random
 import json
-from motivation_quotes import motivation_generator
+from motivation_quotes_fix import motivation_generator
 
 # Настройка логирования
 logging.basicConfig(
@@ -86,7 +86,117 @@ class SimpleCraveBreakerBot:
                 )
             """)
             
+            # Triggers tracking table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_triggers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    trigger_name TEXT,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # User states table for conversation flow
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_states (
+                    user_id INTEGER PRIMARY KEY,
+                    state TEXT,
+                    data TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+
+            
             await db.commit()
+    
+
+    
+    # User state management methods
+    async def set_user_state(self, user_id: int, state: str, data: str = ""):
+        """Set user conversation state"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO user_states (user_id, state, data, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """, (user_id, state, data))
+            await db.commit()
+    
+    async def get_user_state(self, user_id: int):
+        """Get user conversation state"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT state, data FROM user_states WHERE user_id = ?",
+                (user_id,)
+            )
+            result = await cursor.fetchone()
+            return result if result else (None, None)
+    
+    async def clear_user_state(self, user_id: int):
+        """Clear user conversation state"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+            await db.commit()
+            
+    async def get_total_user_count(self):
+        """Get total number of unique users for social proof (URD requirement)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM users")
+            result = await cursor.fetchone()
+            return result[0] if result else 0
+    
+    async def record_trigger(self, user_id: int, trigger_name: str, description: str):
+        """Record user trigger for analytics"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO user_triggers (user_id, trigger_name, description)
+                VALUES (?, ?, ?)
+            """, (user_id, trigger_name, description))
+            await db.commit()
+
+    
+
+    
+    async def get_user_triggers(self, user_id: int):
+        """Get user's recorded triggers"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT trigger_name, description, created_at 
+                FROM user_triggers 
+                WHERE user_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT 10
+            """, (user_id,))
+            return await cursor.fetchall()
+    
+    async def count_total_users(self):
+        """Count total unique users who have used the bot"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM users")
+            result = await cursor.fetchone()
+            return result[0] if result else 0
+    
+    async def ensure_user_exists(self, user_id: int, username: str | None = None):
+        """Ensure user exists in database, create if not"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Check if user exists
+            cursor = await db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+            if not await cursor.fetchone():
+                # Create user if doesn't exist
+                await db.execute(
+                    "INSERT INTO users (user_id, username) VALUES (?, ?)",
+                    (user_id, username)
+                )
+                await db.commit()
+                logger.info(f"Created new user: {user_id}")
+    
+    async def user_exists(self, user_id: int) -> bool:
+        """Check if user exists in database"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+            result = await cursor.fetchone()
+            return result is not None
     
     # Gamification methods
     async def get_user_progress(self, user_id):
@@ -282,6 +392,17 @@ class SimpleCraveBreakerBot:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
                 return response.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    # Handle 409 Conflict - usually means webhook is active or multiple instances
+                    logger.warning("409 Conflict detected - attempting to resolve...")
+                    # Try to delete webhook and wait a bit
+                    await self.delete_webhook()
+                    await asyncio.sleep(2)
+                    return {"ok": True, "result": []}
+                else:
+                    logger.error(f"HTTP error {e.response.status_code}: {e}")
+                    return {"ok": False, "result": []}
             except httpx.TimeoutException:
                 logger.debug("Timeout получения обновлений (это нормально)")
                 return {"ok": True, "result": []}
@@ -295,12 +416,11 @@ class SimpleCraveBreakerBot:
             "inline_keyboard": [
                 [{"text": "🆘 Срочная помощь", "callback_data": "emergency_help"}],
                 [{"text": "🧠 Мои импульсы", "callback_data": "my_impulses"}],
-                [{"text": "🔥 Новый триггер", "callback_data": "new_trigger"}],
                 [{"text": "🏆 Мои достижения", "callback_data": "achievements"}],
                 [{"text": "💫 Мотивация дня", "callback_data": "daily_motivation"}],
                 [{"text": "👨‍💼 Мой персональный коуч", "callback_data": "coaching_session"}],
                 [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
-                [{"text": "📖 О CraveBreaker", "callback_data": "about"}]
+                [{"text": "📖 О CraveBreaker", "callback_data": "about"}, {"text": "❓ F.A.Q.", "callback_data": "faq"}]
             ]
         }
     
@@ -599,7 +719,17 @@ class SimpleCraveBreakerBot:
         user_id = message["from"]["id"]
         text = message.get("text", "")
         
+        # Simple message handling without trigger states
+        
         if text.startswith("/start"):
+            # Record new user for statistics
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT OR IGNORE INTO users (user_id, username, created_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                """, (user_id, message["from"].get("username", "")))
+                await db.commit()
+            
             welcome_text = """🎉 **Добро пожаловать в CraveBreaker!**
 
 Я ваш помощник в борьбе с навязчивыми привычками и импульсами.
@@ -631,6 +761,9 @@ class SimpleCraveBreakerBot:
         data = callback_query["data"]
         message_id = callback_query["message"]["message_id"]
         
+        # DEBUG: Log ALL callback data to trace the routing issue
+        logger.info(f"CALLBACK DEBUG: user_id={user_id}, callback_data='{data}'")
+        
         # Ответ на callback query
         await self.answer_callback_query(callback_query["id"])
         
@@ -643,35 +776,7 @@ class SimpleCraveBreakerBot:
                 await db.execute("INSERT INTO help_requests (user_id) VALUES (?)", (user_id,))
                 await db.commit()
                 
-        elif data == "new_trigger":
-            text = """🔥 **Новый триггер зафиксирован**
 
-Вы столкнулись с триггером? Это нормально - главное, что вы обратились за помощью!
-
-💪 **Что важно помнить:**
-• Каждое обращение ко мне вместо поддавания - уже победа
-• Триггеры помогают нам лучше понимать наши слабые места
-• С каждым разом становится легче сопротивляться
-
-📊 Этот триггер записан в вашу статистику.
-
-**Выберите действие:**"""
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "🆘 Нужна срочная помощь", "callback_data": "emergency_help"}],
-                    [{"text": "📝 Записать заметку", "callback_data": "add_note"}],
-                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
-                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
-                ]
-            }
-            
-            # Записываем триггер в базу данных
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("INSERT INTO help_requests (user_id) VALUES (?)", (user_id,))
-                await db.commit()
-            
-            await self.edit_message(chat_id, message_id, text, keyboard)
         
         elif data == "my_impulses":
             text = """🧠 **Мои импульсы**
@@ -683,6 +788,105 @@ class SimpleCraveBreakerBot:
 Каждый тип импульса требует особого подхода:"""
             await self.edit_message(chat_id, message_id, text, self.get_impulses_menu_keyboard())
         
+        elif data.startswith("impulse_failed"):
+            # DEBUG: Log the callback data to understand the issue
+            logger.info(f"IMPULSE_FAILED DEBUG: callback_data='{data}'")
+            parts = data.split("_")
+            logger.info(f"IMPULSE_FAILED DEBUG: parts={parts}")
+            
+            if len(parts) >= 3:
+                # Extract impulse type from callback data: impulse_failed_[TYPE]
+                impulse_type = parts[2]
+                logger.info(f"IMPULSE_FAILED DEBUG: extracted impulse_type='{impulse_type}'")
+            else:
+                # Fallback - should never happen with correct button creation
+                impulse_type = "sweets"
+                logger.warning(f"IMPULSE_FAILED DEBUG: Using fallback impulse_type='sweets', parts={parts}")
+            
+            # Store current impulse context to maintain routing
+            await self.set_user_state(user_id, "current_impulse", impulse_type)
+            logger.info(f"IMPULSE_FAILED DEBUG: stored impulse_type='{impulse_type}' for user {user_id}")
+            
+            text = f"""😌 **Эта техника не подошла**
+
+Не переживайте! Поиск подходящей техники - это нормальный процесс.
+
+🧠 **Что важно понимать:**
+• Сам факт попытки - уже прогресс
+• Вы тренируете навык осознанности  
+• Каждая попытка приближает к успеху
+
+💡 **Давайте попробуем другую технику для того же импульса**"""
+            
+            # FIXED: Always return to the SAME impulse type, not defaulting to sweets
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🔄 Другая техника", "callback_data": f"impulse_{impulse_type}"}],
+                    [{"text": "🆘 Срочная помощь", "callback_data": "emergency_help"}],
+                    [{"text": "🧠 Другой тип импульса", "callback_data": "my_impulses"}],
+                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
+                ]
+            }
+            await self.edit_message(chat_id, message_id, text, keyboard)
+        
+        elif data.startswith("impulse_success"):
+            # Extract impulse type if provided
+            impulse_type = ""
+            if "_" in data:
+                impulse_type = data.split("_", 2)[2] if len(data.split("_")) > 2 else ""
+            # Update database record to successful
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    UPDATE interventions 
+                    SET success = 1 
+                    WHERE user_id = ? AND id = (
+                        SELECT MAX(id) FROM interventions WHERE user_id = ?
+                    )
+                """, (user_id, user_id))
+                await db.commit()
+            
+            # Process successful intervention with gamification
+            new_badges = await self.process_intervention_success(user_id, "impulse")
+            
+            text = """🎉 **Отлично! Техника сработала!**
+
+Поздравляю! Вы успешно справились с импульсом.
+
+💎 **+10 XP**
+
+"""
+            
+            # Add badge notifications if any
+            if new_badges:
+                text += "🏆 **НОВЫЕ ДОСТИЖЕНИЯ!**\n"
+                for badge_name, xp_reward in new_badges:
+                    text += f"• {badge_name} (+{xp_reward} XP)\n"
+                    # Try AI-enhanced achievement celebration first
+                    progress = await self.get_user_progress(user_id)
+                    ai_celebration = await motivation_generator.get_ai_achievement_celebration(badge_name, progress)
+                    if ai_celebration:
+                        text += f"\n💫 *{ai_celebration}*\n"
+                    else:
+                        # Fallback to curated achievement quote
+                        achievement_quote = motivation_generator.get_achievement_quote(badge_name, xp_reward)
+                        text += f"\n💫 *{achievement_quote}*\n"
+            
+            text += """
+• Успешно справились с желанием
+
+📈 **Ваш мозг учится:** каждая победа укрепляет нейронные пути самоконтроля.
+
+Продолжайте в том же духе!"""
+            
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🏆 Мои достижения", "callback_data": "achievements"}],
+                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
+                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
+                ]
+            }
+            await self.edit_message(chat_id, message_id, text, keyboard)
+            
         elif data.startswith("impulse_"):
             impulse_type = data.replace("impulse_", "")
             interventions = self.get_impulse_interventions(impulse_type)
@@ -712,8 +916,15 @@ class SimpleCraveBreakerBot:
             
         elif data.startswith("technique_"):
             parts = data.split("_")
+            if len(parts) < 3:
+                logger.error(f"Invalid technique callback data: {data}")
+                return
             impulse_type = parts[1]
-            technique_index = int(parts[2])
+            try:
+                technique_index = int(parts[2])
+            except (ValueError, IndexError) as e:
+                logger.error(f"Error parsing technique index from callback data '{data}': {e}")
+                return
             
             interventions = self.get_impulse_interventions(impulse_type)
             technique = interventions['techniques'][technique_index]
@@ -726,10 +937,14 @@ class SimpleCraveBreakerBot:
 
 После выполнения техники оцените результат:"""
             
+            # DEBUG: Log button creation
+            failed_callback = f"impulse_failed_{impulse_type}"
+            logger.info(f"BUTTON DEBUG: Creating 'Не сработало' button with callback_data='{failed_callback}'")
+            
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "✅ Помогло!", "callback_data": "impulse_success"}],
-                    [{"text": "❌ Не сработало", "callback_data": "impulse_failed"}],
+                    [{"text": "✅ Помогло!", "callback_data": f"impulse_success_{impulse_type}"}],
+                    [{"text": "❌ Не сработало", "callback_data": failed_callback}],
                     [{"text": "🔄 Другая техника", "callback_data": f"impulse_{impulse_type}"}],
                     [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
                 ]
@@ -795,6 +1010,8 @@ class SimpleCraveBreakerBot:
             await self.edit_message(chat_id, message_id, text, keyboard)
             
         elif data.startswith("outcome_"):
+            # DEBUG: Log outcome callback
+            logger.info(f"OUTCOME DEBUG: callback_data='{data}'")
             success = data == "outcome_success"
             
             # Record result in interventions table
@@ -834,90 +1051,6 @@ class SimpleCraveBreakerBot:
             
             await self.edit_message(chat_id, message_id, text, keyboard)
         
-        elif data == "impulse_success":
-            # Update database record to successful
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    UPDATE interventions 
-                    SET success = 1 
-                    WHERE user_id = ? AND id = (
-                        SELECT MAX(id) FROM interventions WHERE user_id = ?
-                    )
-                """, (user_id, user_id))
-                await db.commit()
-            
-            # Process successful intervention with gamification
-            new_badges = await self.process_intervention_success(user_id, "impulse")
-            
-            text = """🎉 **Отлично! Техника сработала!**
-
-Вы смогли преодолеть импульс! Это настоящая победа.
-
-💪 **Что произошло:**
-• Вы осознали свой импульс
-• Применили конкретную технику
-
-💎 **+10 XP**"""
-            
-            # Add badge notifications if any
-            if new_badges:
-                text += "\n\n🏆 **НОВЫЕ ДОСТИЖЕНИЯ!**\n"
-                for badge_name, xp_reward in new_badges:
-                    text += f"• {badge_name} (+{xp_reward} XP)\n"
-                    # Try AI-enhanced achievement celebration first
-                    progress = await self.get_user_progress(user_id)
-                    ai_celebration = await motivation_generator.get_ai_achievement_celebration(badge_name, progress)
-                    if ai_celebration:
-                        text += f"\n💫 *{ai_celebration}*\n"
-                    else:
-                        # Fallback to curated achievement quote
-                        achievement_quote = motivation_generator.get_achievement_quote(badge_name, xp_reward)
-                        text += f"\n💫 *{achievement_quote}*\n"
-            
-            text += """
-• Успешно справились с желанием
-
-📈 **Ваш мозг учится:** каждая победа укрепляет нейронные пути самоконтроля.
-
-Продолжайте в том же духе!"""
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "🏆 Мои достижения", "callback_data": "achievements"}],
-                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
-                    [{"text": "🧠 Другие импульсы", "callback_data": "my_impulses"}],
-                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
-                ]
-            }
-            await self.edit_message(chat_id, message_id, text, keyboard)
-            
-        elif data == "impulse_failed":
-            text = """😌 **Все в порядке!**
-
-Не каждая техника подходит в каждый момент. Это нормальная часть процесса.
-
-🧠 **Что важно понимать:**
-• Сам факт попытки - уже прогресс
-• Вы тренируете навык осознанности
-• Каждая попытка приближает к успеху
-
-💡 **Попробуйте:**
-• Другую технику для этого же импульса
-• Комбинацию нескольких методов
-• Обратиться за экстренной помощью
-
-Не сдавайтесь! 💪"""
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "🔄 Попробовать другую технику", "callback_data": "my_impulses"}],
-                    [{"text": "🆘 Экстренная помощь", "callback_data": "emergency_help"}],
-                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
-                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
-                ]
-            }
-            await self.edit_message(chat_id, message_id, text, keyboard)
-            
         elif data == "achievements":
             progress = await self.get_user_progress(user_id)
             badges_earned = json.loads(progress["badges_earned"])
@@ -996,7 +1129,7 @@ class SimpleCraveBreakerBot:
             progress = await self.get_user_progress(user_id)
             
             # Get AI-enhanced personalized quote
-            enhanced_quote = await motivation_generator.get_enhanced_personalized_quote(progress, "morning")
+            enhanced_quote = motivation_generator.get_enhanced_personalized_quote(progress, "morning")
             
             # Get daily challenge
             daily_challenge = motivation_generator.get_daily_challenge_quote()
@@ -1026,7 +1159,7 @@ class SimpleCraveBreakerBot:
             progress = await self.get_user_progress(user_id)
             
             # Get AI-enhanced evening reflection quote
-            reflection_quote = await motivation_generator.get_enhanced_personalized_quote(progress, "evening_reflection")
+            reflection_quote = motivation_generator.get_enhanced_personalized_quote(progress, "evening_reflection")
             
             text = f"""🌅 **ВЕЧЕРНЯЯ РЕФЛЕКСИЯ**
 
@@ -1042,7 +1175,6 @@ class SimpleCraveBreakerBot:
             
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "📝 Записать мысли", "callback_data": "add_note"}],
                     [{"text": "🔄 Другая цитата", "callback_data": "evening_reflection"}],
                     [{"text": "💫 Утренняя мотивация", "callback_data": "daily_motivation"}],
                     [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
@@ -1189,11 +1321,65 @@ class SimpleCraveBreakerBot:
             }
             await self.edit_message(chat_id, message_id, text, keyboard)
 
+        elif data == "faq":
+            text = """❓ **F.A.Q. - Часто задаваемые вопросы**
+
+🎯 **Как работает система прогресса?**
+• **XP (опыт)**: Получаете за каждую успешную интервенцию (+10 XP)
+• **Уровни**: Автоматически повышаются при накоплении XP (уровень 1 = 100 XP, уровень 2 = 250 XP и т.д.)
+• **Серии**: Дни подряд с успешными интервенциями (обнуляются при пропуске дня)
+
+🏆 **Что такое достижения (бейджи)?**
+Награды за важные вехи:
+• 🌱 **Первый шаг** - первая успешная интервенция (+50 XP)
+• 🎯 **Новичок** - 10 успешных интервенций (+100 XP)
+• 🔥 **Тепло** - серия 3 дня (+75 XP)
+• ⚡ **Неделя силы** - серия 7 дней (+150 XP)
+• 💎 **Эксперт** - 100 интервенций (+300 XP)
+
+🧠 **Как формируются новые привычки?**
+1. **21 день** - начинают формироваться нейронные пути
+2. **66 дней** - привычка становится автоматической (в среднем)
+3. **90 дней** - устойчивая привычка, сложно сломать
+
+💪 **К чему вы идете?**
+• **Самоконтроль становится автоматическим**
+• **Стресс-реакции ослабевают**
+• **Появляется "пауза" между импульсом и действием**
+• **Уверенность в своих силах растет**
+
+💡 **Дополнительные возможности:**
+Изучите свои достижения и статистику использования техник."""
+            
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🏆 Мои достижения", "callback_data": "achievements"}],
+                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
+                    [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
+                ]
+            }
+            await self.edit_message(chat_id, message_id, text, keyboard)
+        
+
+        
+
+            
+
+            
+
+
         elif data == "about":
-            text = """📖 **О CraveBreaker**
+            count = await self.get_total_user_count()
+            
+            # Get total user count for social proof
+            total_users = await self.get_total_user_count()
+            
+            text = f"""📖 **О CraveBreaker**
 
 🎯 **Миссия:**
 Помочь людям обрести контроль над своими импульсами и привычками через поддержку в критические моменты.
+
+📊 **CraveBreaker уже использовали: {total_users} человек** 💪
 
 🧠 **Научная основа:**
 Бот использует проверенные методы:
@@ -1211,7 +1397,7 @@ class SimpleCraveBreakerBot:
 
 **Помните:** Сила воли - это навык, который можно тренировать! 💪
 
-👨‍💼 **Разработано в партнерстве с @SpotCoach** - сертифицированным лайф- и бизнес-коучем Международной Федерации Коучинга"""
+👨‍💼 **Разработано в партнерстве с @SpotCoach, сертифицированным лайф- и бизнес-коучем Международной Федерации Коучинга, и @Irinamaximoff, сертифицированным лайф-коучем ICU.**"""
             
             keyboard = {
                 "inline_keyboard": [
@@ -1221,50 +1407,77 @@ class SimpleCraveBreakerBot:
             }
             await self.edit_message(chat_id, message_id, text, keyboard)
             
-        elif data == "add_note":
-            text = """📝 **Заметка о триггере**
 
-Отличная идея записать свои наблюдения! Это поможет лучше понимать паттерны.
+            
+        elif data.startswith("helped_"):
+            # Parse technique type from callback
+            technique_info = data.replace("helped_", "")
+            
+            # Update intervention as successful
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("UPDATE interventions SET success = 1 WHERE user_id = ? AND success = 0 ORDER BY created_at DESC LIMIT 1", (user_id,))
+                await db.commit()
+            
+            # Process gamification for successful intervention
+            new_badges = await self.process_intervention_success(user_id, technique_info)
+            progress = await self.get_user_progress(user_id)
+            
+            badge_text = ""
+            if new_badges:
+                badge_list = "\n".join([f"🏆 {badge} (+{xp} XP)" for badge, xp in new_badges])
+                badge_text = f"\n\n🎉 **НОВЫЕ ДОСТИЖЕНИЯ!**\n{badge_list}"
+            
+            text = f"""🎉 **Превосходно! Техника сработала!**
 
-💭 **Подумайте над этими вопросами:**
-• Что именно вызвало желание?
-• В какое время это произошло?
-• Какие эмоции вы испытывали?
-• Где вы находились?
-• С кем были?
+Вы успешно справились с импульсом и показали, что можете контролировать свои реакции.
 
-📝 Запишите свои мысли в заметках телефона или дневнике.
+💪 **Ваши результаты:**
+• Уровень: {progress['level']} ✨
+• Опыт: {progress['xp']} XP
+• Успешных интервенций: {progress['total_interventions']}
+• Текущая серия: {progress['current_streak']} дней 🔥
 
-🎯 **Совет:** Ведение дневника триггеров помогает найти закономерности и лучше их контролировать."""
+{badge_text}
+
+🧠 **Важно помнить:** Каждая успешная интервенция укрепляет вашу способность к самоконтролю. Вы становитесь сильнее!"""
             
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "✅ Записал(а)", "callback_data": "note_saved"}],
-                    [{"text": "🆘 Нужна помощь", "callback_data": "emergency_help"}],
+                    [{"text": "🏆 Посмотреть достижения", "callback_data": "achievements"}],
+                    [{"text": "💫 Получить мотивацию", "callback_data": "daily_motivation"}],
+                    [{"text": "📝 Записать заметку об успехе", "callback_data": "add_note"}],
                     [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
                 ]
             }
+            
             await self.edit_message(chat_id, message_id, text, keyboard)
             
-        elif data == "note_saved":
-            text = """✅ **Отлично!**
+        elif data.startswith("not_helped_"):
+            # Parse technique type from callback
+            technique_info = data.replace("not_helped_", "")
+            
+            text = """💙 **Не расстраивайтесь! Это нормально.**
 
-Записывание мыслей и наблюдений - мощный инструмент самопознания.
+Не каждая техника подходит каждому человеку в каждой ситуации. Это важный опыт!
 
-🧠 **Что происходит в мозге:**
-• Осознанность помогает замедлить автоматические реакции
-• Анализ триггеров развивает эмоциональный интеллект
-• Письменная фиксация усиливает самоконтроль
+🔍 **Что можно попробовать:**
+• Другую технику из того же раздела
+• Техники из другой категории  
+• Комбинацию нескольких методов
+• Изменить обстановку и попробовать снова
 
-📈 **Ваш прогресс растет с каждой записью!**"""
+💪 **Главное:** Вы обратились за помощью вместо того, чтобы сразу поддаться импульсу. Это уже победа!"""
             
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": "🏆 Мои достижения", "callback_data": "achievements"}],
-                    [{"text": "📊 Моя статистика", "callback_data": "show_stats"}],
+                    [{"text": "🔄 Попробовать другую технику", "callback_data": "emergency_help"}],
+                    [{"text": "🆘 Экстренная помощь", "callback_data": "emergency_help"}],
+                    [{"text": "👨‍💼 Связаться с коучем", "callback_data": "contact_coach"}],
+                    [{"text": "📝 Записать что не сработало", "callback_data": "add_note"}],
                     [{"text": "🏠 Главное меню", "callback_data": "back_to_menu"}]
                 ]
             }
+            
             await self.edit_message(chat_id, message_id, text, keyboard)
             
         elif data == "back_to_menu":
@@ -1284,6 +1497,21 @@ class SimpleCraveBreakerBot:
         
         async with httpx.AsyncClient() as client:
             await client.post(url, json=data)
+    
+    async def delete_webhook(self):
+        """Delete any active webhook to resolve 409 conflicts"""
+        import httpx
+        
+        url = f"{self.base_url}/deleteWebhook"
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url)
+                logger.info("Webhook deleted to resolve conflict")
+                return response.json()
+            except Exception as e:
+                logger.error(f"Error deleting webhook: {e}")
+                return None
     
     async def edit_message(self, chat_id, message_id, text, reply_markup=None):
         """Редактирование сообщения"""
@@ -1353,3 +1581,6 @@ if __name__ == "__main__":
         logger.info("Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
+
+
+    

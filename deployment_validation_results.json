@@ -1,0 +1,115 @@
+{
+  "timestamp": 1753721977.079725,
+  "tests": {
+    "env_telegram_token": {
+      "passed": true,
+      "message": "TELEGRAM_BOT_TOKEN configured",
+      "timestamp": 1753721977.079817
+    },
+    "env_session_secret": {
+      "passed": true,
+      "message": "SESSION_SECRET configured",
+      "timestamp": 1753721977.0798578
+    },
+    "env_port": {
+      "passed": true,
+      "message": "PORT configured: 5000",
+      "timestamp": 1753721977.0799022
+    },
+    "file_main.py": {
+      "passed": true,
+      "message": "main.py exists",
+      "timestamp": 1753721977.080055
+    },
+    "file_simple_bot.py": {
+      "passed": true,
+      "message": "simple_bot.py exists",
+      "timestamp": 1753721977.080149
+    },
+    "file_wsgi.py": {
+      "passed": true,
+      "message": "wsgi.py exists",
+      "timestamp": 1753721977.080246
+    },
+    "file_replit_deploy.toml": {
+      "passed": true,
+      "message": "replit_deploy.toml exists",
+      "timestamp": 1753721977.0804827
+    },
+    "file_pyproject.toml": {
+      "passed": true,
+      "message": "pyproject.toml exists",
+      "timestamp": 1753721977.0805848
+    },
+    "file_Procfile": {
+      "passed": true,
+      "message": "Procfile exists",
+      "timestamp": 1753721977.080776
+    },
+    "file_Dockerfile": {
+      "passed": true,
+      "message": "Dockerfile exists",
+      "timestamp": 1753721977.0808733
+    },
+    "file_gunicorn.conf.py": {
+      "passed": true,
+      "message": "gunicorn.conf.py exists",
+      "timestamp": 1753721977.080958
+    },
+    "import_flask": {
+      "passed": true,
+      "message": "flask imports successfully",
+      "timestamp": 1753721977.0810952
+    },
+    "import_aiosqlite": {
+      "passed": true,
+      "message": "aiosqlite imports successfully",
+      "timestamp": 1753721977.081147
+    },
+    "import_httpx": {
+      "passed": true,
+      "message": "httpx imports successfully",
+      "timestamp": 1753721977.0812118
+    },
+    "import_simple_bot": {
+      "passed": true,
+      "message": "simple_bot imports successfully",
+      "timestamp": 1753721977.0959506
+    },
+    "database_init": {
+      "passed": true,
+      "message": "Database initialized with 8 tables",
+      "timestamp": 1753721977.1102865
+    },
+    "flask_app": {
+      "passed": true,
+      "message": "Flask app created successfully",
+      "timestamp": 1753721977.1144145
+    },
+    "flask_routes": {
+      "passed": true,
+      "message": "All routes available: ['/static/<path:filename>', '/', '/health', '/status', '/restart']",
+      "timestamp": 1753721977.1145008
+    },
+    "deploy_config_run": {
+      "passed": true,
+      "message": "Replit deploy run command correct",
+      "timestamp": 1753721977.1191747
+    },
+    "deploy_config_health": {
+      "passed": true,
+      "message": "Health check path configured",
+      "timestamp": 1753721977.1192322
+    },
+    "procfile": {
+      "passed": true,
+      "message": "Procfile configured correctly",
+      "timestamp": 1753721977.1196594
+    }
+  },
+  "summary": {
+    "passed": 21,
+    "failed": 0,
+    "total": 21
+  }
+}

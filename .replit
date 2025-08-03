@@ -5,7 +5,7 @@ channel = "stable-24_05"
 packages = ["curl", "git"]
 
 [workflows]
-runButton = "Project"
+runButton = "Test Bot Full"
 
 [[workflows.workflow]]
 name = "Project"
@@ -14,15 +14,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "CraveBreaker Deploy"
+args = "Test Bot Full"
 
 [[workflows.workflow]]
-name = "CraveBreaker Deploy"
+name = "Test Bot Full"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python app.py"
+args = "export TELEGRAM_BOT_TOKEN=$TEST_TELEGRAM_BOT_TOKEN && python test_with_bot.py"
 waitForPort = 5000
 
 [deployment]
